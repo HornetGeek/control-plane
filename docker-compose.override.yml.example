@@ -1,0 +1,28 @@
+# Docker Compose Override for Local Development
+# Copy this file to docker-compose.override.yml and customize as needed
+# Usage: cp docker-compose.override.yml.example docker-compose.override.yml
+
+version: "3.8"
+
+services:
+  # Override API service for development
+  api:
+    # Mount source code for hot-reload (if using dev server)
+    volumes:
+      - ./src:/app/src
+    # Use dev server with auto-reload
+    command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # Optional: Add Adminer for database management
+  adminer:
+    image: adminer:latest
+    container_name: control-plane-adminer
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: nette
+    networks:
+      - control-plane-network
+    profiles:
+      - tools

@@ -1,0 +1,124 @@
+# Docker Compose for Control Plane API
+# Usage: docker-compose up
+
+version: "3.8"
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: control-plane-db
+    environment:
+      POSTGRES_DB: control_plane
+      POSTGRES_USER: control_plane
+      POSTGRES_PASSWORD: control_plane_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U control_plane -d control_plane"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - control-plane-network
+
+  # Zitadel (OIDC Identity Provider) - for development/testing
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:latest
+    container_name: control-plane-zitadel
+    environment:
+      ZITADEL_DATABASE_HOST: postgres:5432
+      ZITADEL_DATABASE_DATABASE: zitadel
+      ZITADEL_DATABASE_USER_SCHEME: $ZITADEL_DATABASE_USER_SCHEME
+      ZITADEL_DATABASE_USER_PASSWORD: $ZITADEL_DATABASE_USER_PASSWORD
+      ZITADEL_DATABASE_ADMIN_SCHEME: $ZITADEL_DATABASE_ADMIN_SCHEME
+      ZITADEL_DATABASE_ADMIN_PASSWORD: $ZITADEL_DATABASE_ADMIN_PASSWORD
+      ZITADEL_EXTERNALDOMAIN: localhost.zitadel.127.0.0.1.sslip.io
+      ZITADEL_EXTERNALPORT: 8080
+      ZITADEL_EXTERNALSECURE: false
+      ZITADEL_TLS_ENABLED: false
+      ZITADEL_INITLOGIN: admin@zitadel.localhost.zitadel.127.0.0.1.sslip.io
+      ZITADEL_INITPASSWORD: adminAdmin!
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - control-plane-network
+
+  # Control Plane API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: control-plane-api
+    environment:
+      # Application
+      CONTROL_PLANE_ENV: development
+      CONTROL_PLANE_HOST: 0.0.0.0
+      CONTROL_PLANE_PORT: 8000
+      CONTROL_PLANE_LOG_LEVEL: info
+
+      # Database
+      DATABASE_URL: postgresql+asyncpg://control_plane:control_plane_password@postgres:5432/control_plane
+
+      # OIDC / Zitadel
+      OIDC_ISSUER: http://localhost.zitadel.127.0.0.1.sslip.io:8080/default
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-control-plane-client}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-control-plane-secret}
+      OIDC_REDIRECT_URI: http://localhost:8000/v1/auth/callback
+      OIDC_SCOPES: openid profile email org_id
+
+      # Application Catalog
+      APPLICATIONS__PACS__NAME: PACS
+      APPLICATIONS__PACS__URL: https://pacs.example.com/launch
+      APPLICATIONS__PACS__STATUS: active
+      APPLICATIONS__ERP__NAME: ERP
+      APPLICATIONS__ERP__URL: https://erp.example.com/launch
+      APPLICATIONS__ERP__STATUS: active
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - control-plane-network
+    volumes:
+      - ./src:/app/src:ro
+      - ./alembic:/app/alembic:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+
+  # Database migration runner (one-shot)
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: control-plane-migrate
+    environment:
+      DATABASE_URL: postgresql+asyncpg://control_plane:control_plane_password@postgres:5432/control_plane
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - control-plane-network
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 5 &&
+        alembic upgrade head &&
+        echo 'Migrations completed successfully'
+      "
+    profiles:
+      - migrate
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  control-plane-network:
+    driver: bridge

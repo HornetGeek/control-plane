@@ -1,0 +1,624 @@
+openapi: 3.0.3
+info:
+  title: Control Plane API
+  description: Multi-tenant SaaS control plane for organization, tenant, and subscription management
+  version: 1.0.0
+  contact:
+    name: Control Plane Team
+
+servers:
+  - url: https://control-plane.example.com/v1
+    description: Production
+  - url: http://localhost:8000/v1
+    description: Local development
+
+tags:
+  - name: Auth
+    description: OIDC authentication and user management
+  - name: Tenants
+    description: Tenant CRUD operations
+  - name: Memberships
+    description: Tenant membership management
+  - name: Applications
+    description: Application catalog
+  - name: Subscriptions
+    description: Application subscription management
+  - name: Launch
+    description: Application launch routing
+
+security:
+  - BearerAuth: []
+
+paths:
+  /auth/login:
+    get:
+      tags: [Auth]
+      summary: Initiate OIDC login
+      description: Redirects user to Zitadel for authentication
+      operationId: login
+      security: []
+      parameters:
+        - name: redirect_uri
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional override for redirect URI
+      responses:
+        '302':
+          description: Redirect to Zitadel authorization endpoint
+          headers:
+            Location:
+              schema:
+                type: string
+        '400':
+          description: Invalid request
+
+  /auth/callback:
+    get:
+      tags: [Auth]
+      summary: OIDC callback handler
+      description: Handles callback from Zitadel after authentication
+      operationId: callback
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Authorization code from Zitadel
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Invalid callback request
+        '401':
+          description: Authentication failed
+        '500':
+          description: Server error during authentication
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current user
+      description: Returns information about the authenticated user
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: User information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Not authenticated
+
+  /tenants:
+    post:
+      tags: [Tenants]
+      summary: Create tenant
+      description: Creates a new tenant (org_admin only)
+      operationId: createTenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantCreate'
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+        '400':
+          description: Invalid request
+        '401':
+          description: Not authenticated
+        '403':
+          description: Not authorized (org_admin required)
+    get:
+      tags: [Tenants]
+      summary: List tenants
+      description: Lists tenants accessible to the user
+      operationId: listTenants
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of tenants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantListResponse'
+
+  /tenants/{tenant_id}:
+    get:
+      tags: [Tenants]
+      summary: Get tenant
+      description: Returns details for a specific tenant
+      operationId: getTenant
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+        '401':
+          description: Not authenticated
+        '403':
+          description: Access denied
+        '404':
+          description: Tenant not found
+
+  /tenants/{tenant_id}/members:
+    post:
+      tags: [Memberships]
+      summary: Add tenant member
+      description: Adds a user to a tenant with a role
+      operationId: addMember
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MembershipCreate'
+      responses:
+        '201':
+          description: Member added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipResponse'
+        '400':
+          description: Invalid request
+        '403':
+          description: Not authorized
+        '409':
+          description: User already member
+    get:
+      tags: [Memberships]
+      summary: List tenant members
+      description: Lists all members of a tenant
+      operationId: listMembers
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of members
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemberListResponse'
+
+  /tenants/{tenant_id}/members/{user_id}:
+    delete:
+      tags: [Memberships]
+      summary: Remove tenant member
+      description: Removes a user from a tenant
+      operationId: removeMember
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Member removed
+        '403':
+          description: Not authorized
+        '404':
+          description: Membership not found
+
+  /applications:
+    get:
+      tags: [Applications]
+      summary: List applications
+      description: Returns catalog of available applications
+      operationId: listApplications
+      responses:
+        '200':
+          description: Application catalog
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationListResponse'
+
+  /tenants/{tenant_id}/subscriptions:
+    post:
+      tags: [Subscriptions]
+      summary: Subscribe to application
+      description: Subscribes a tenant to an application (idempotent)
+      operationId: createSubscription
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionCreate'
+      responses:
+        '201':
+          description: Subscription created (or existing returned)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+        '400':
+          description: Invalid request
+        '403':
+          description: Not authorized
+        '404':
+          description: Application not found
+    get:
+      tags: [Subscriptions]
+      summary: List subscriptions
+      description: Lists all subscriptions for a tenant
+      operationId: listSubscriptions
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of subscriptions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionListResponse'
+
+  /tenants/{tenant_id}/subscriptions/{sub_id}:
+    patch:
+      tags: [Subscriptions]
+      summary: Update subscription status
+      description: Updates the status of a subscription
+      operationId: updateSubscription
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: sub_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionUpdate'
+      responses:
+        '200':
+          description: Subscription updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+        '400':
+          description: Invalid request
+        '403':
+          description: Not authorized
+        '404':
+          description: Subscription not found
+
+  /launch:
+    post:
+      tags: [Launch]
+      summary: Launch application
+      description: Returns redirect URL to launch an application with tenant context
+      operationId: launch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LaunchRequest'
+      responses:
+        '200':
+          description: Launch URL generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LaunchResponse'
+        '400':
+          description: Invalid request
+        '403':
+          description: Access denied (not member, no subscription, etc.)
+        '404':
+          description: Application or tenant not found
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    AuthResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [bearer]
+        user:
+          $ref: '#/components/schemas/UserResponse'
+
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    TenantCreate:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+
+    TenantResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    TenantListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantResponse'
+
+    MembershipCreate:
+      type: object
+      required:
+        - user_id
+        - role
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [org_admin, tenant_admin, tenant_member]
+
+    MembershipResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [org_admin, tenant_admin, tenant_member]
+        created_at:
+          type: string
+          format: date-time
+
+    MemberListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              user_id:
+                type: string
+                format: uuid
+              email:
+                type: string
+              name:
+                type: string
+              role:
+                type: string
+                enum: [org_admin, tenant_admin, tenant_member]
+
+    ApplicationInfo:
+      type: object
+      properties:
+        app_key:
+          type: string
+        name:
+          type: string
+        launch_base_url:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive]
+
+    ApplicationListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApplicationInfo'
+
+    SubscriptionCreate:
+      type: object
+      required:
+        - app_key
+      properties:
+        app_key:
+          type: string
+
+    SubscriptionUpdate:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [active, suspended, canceled]
+
+    SubscriptionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        app_key:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended, canceled]
+        started_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SubscriptionListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubscriptionResponse'
+
+    LaunchRequest:
+      type: object
+      required:
+        - tenant_id
+        - app_key
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        app_key:
+          type: string
+        return_to:
+          type: string
+          format: uri
+
+    LaunchResponse:
+      type: object
+      properties:
+        redirect_url:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+        request_id:
+          type: string
+          format: uuid
