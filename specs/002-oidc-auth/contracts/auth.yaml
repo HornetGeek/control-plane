@@ -1,0 +1,269 @@
+openapi: 3.0.3
+info:
+  title: Control Plane - Authentication API
+  description: |
+    OIDC authentication endpoints for the Control Plane.
+
+    This API implements the OpenID Connect authorization code flow with Zitadel as the identity provider.
+  version: 1.0.0
+  contact:
+    name: Control Plane Team
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: https://api.controlplane.example.com
+    description: Production
+
+tags:
+  - name: Authentication
+    description: User authentication and token management
+
+paths:
+  /v1/auth/login:
+    get:
+      tags:
+        - Authentication
+      summary: Initiate OIDC login
+      description: |
+        Redirects the user's browser to the Zitadel authorization endpoint.
+        After authentication, Zitadel redirects back to the callback endpoint with an authorization code.
+      operationId: initiateLogin
+      parameters:
+        - name: redirect_uri
+          in: query
+          description: Optional override for the redirect URI (must be whitelisted in Zitadel)
+          required: false
+          schema:
+            type: string
+            format: uri
+            example: https://app.example.com/auth/callback
+      responses:
+        '302':
+          description: Found - Redirect to Zitadel authorization endpoint
+          headers:
+            Location:
+              description: Authorization URL at Zitadel
+              schema:
+                type: string
+                format: uri
+        '400':
+          description: Bad Request - Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/callback:
+    get:
+      tags:
+        - Authentication
+      summary: OIDC callback handler
+      description: |
+        Handles the callback from Zitadel after user authentication.
+        Exchanges the authorization code for tokens, validates the ID token,
+        creates or updates the user record, and returns the access token with user info.
+      operationId: handleCallback
+      parameters:
+        - name: code
+          in: query
+          description: Authorization code from Zitadel
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: State parameter for CSRF protection (should match generated value)
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          description: Error code from Zitadel (if authentication failed)
+          required: false
+          schema:
+            type: string
+        - name: error_description
+          in: query
+          description: Human-readable error description from Zitadel
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Bad Request - Invalid code, missing claims, or other client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missingClaims:
+                  summary: Missing required claims
+                  value:
+                    code: AUTH_MISSING_CLAIMS
+                    message: Token missing required claim: org_id
+                    details: {}
+                invalidCode:
+                  summary: Invalid authorization code
+                  value:
+                    code: AUTH_INVALID_CODE
+                    message: The authorization code is invalid or expired
+                    details: {}
+        '401':
+          description: Unauthorized - Token validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/me:
+    get:
+      tags:
+        - Authentication
+      summary: Get current user info
+      description: |
+        Returns the authenticated user's profile information.
+        Requires a valid bearer token from the OIDC callback.
+      operationId: getCurrentUser
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Unauthorized - Invalid or missing token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found - User not found in database
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT access token from Zitadel. The token must be signed by the configured
+        issuer and contain the required claims (sub, org_id, email).
+
+  schemas:
+    AuthResponse:
+      type: object
+      description: Response containing access token and user information
+      required:
+        - access_token
+        - token_type
+        - user
+      properties:
+        access_token:
+          type: string
+          description: JWT access token for API calls
+          example: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+        token_type:
+          type: string
+          description: Type of the access token
+          enum: [bearer]
+          example: bearer
+        expires_in:
+          type: integer
+          description: Token expiration time in seconds (if provided by IdP)
+          example: 3600
+        refresh_token:
+          type: string
+          description: Refresh token (if provided by IdP)
+          example: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+        user:
+          $ref: '#/components/schemas/UserResponse'
+
+    UserResponse:
+      type: object
+      description: User profile information
+      required:
+        - id
+        - organization_id
+        - email
+        - name
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: User's internal unique identifier
+          example: 550e8400-e29b-41d4-a716-446655440000
+        organization_id:
+          type: string
+          format: uuid
+          description: User's organization identifier
+          example: 550e8400-e29b-41d4-a716-446655440001
+        email:
+          type: string
+          format: email
+          description: User's email address
+          example: user@example.com
+        name:
+          type: string
+          description: User's display name
+          example: John Doe
+        last_login_at:
+          type: string
+          format: date-time
+          description: Timestamp of user's most recent login
+          example: 2024-01-15T10:30:00Z
+          nullable: true
+
+    Error:
+      type: object
+      description: Standard error response
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          example: AUTH_INVALID_TOKEN
+        message:
+          type: string
+          description: Human-readable error message
+          example: The provided token is invalid or expired
+        details:
+          type: object
+          description: Additional error context (optional)
+          additionalProperties: true
+          example: {}
+
+  examples:
+    successfulAuth:
+      summary: Successful authentication response
+      value:
+        access_token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwib3JnX2lkIjoiNTUwZTg0MDAtZTI5Yi00MWQ0LWE3MTYtNDQ2NjU1NDQwMDAxIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwibmFtZSI6IkpvaG4gRG9lIiwiaXNzIjoiaHR0cHM6Ly9hdXRoLmNyYWZ0LWNyZXcuY29tIiwiYXVkIjoiY29udHJvbC1wbGFuZS1jbGllbnQiLCJleHAiOjE3MDAwMDAwMDB9.signature
+        token_type: bearer
+        expires_in: 3600
+        user:
+          id: 550e8400-e29b-41d4-a716-446655440000
+          organization_id: 550e8400-e29b-41d4-a716-446655440001
+          email: user@example.com
+          name: John Doe
+          last_login_at: 2024-01-15T10:30:00Z
