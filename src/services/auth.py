@@ -26,7 +26,8 @@ async def exchange_code_for_token(code: str, redirect_uri: str | None = None) ->
     """
     settings = get_settings()
 
-    token_url = f"{settings.oidc_issuer}/oauth/v2/token"
+    # Use Keycloak-style path (works with Keycloak, can be overridden for other providers)
+    token_url = f"{settings.oidc_issuer}/protocol/openid-connect/token"
 
     data = {
         "grant_type": "authorization_code",

@@ -38,7 +38,8 @@ async def login(
         "state": oidc_service.generate_state(),  # CSRF protection
     }
 
-    auth_url = f"{settings.oidc_issuer}/oauth/v2/authorize?{urlencode(params)}"
+    # Use Keycloak-style path (works with Keycloak, can be overridden for other providers)
+    auth_url = f"{settings.oidc_issuer}/protocol/openid-connect/auth?{urlencode(params)}"
 
     # Raise HTTPException with redirect status to trigger browser redirect
     raise HTTPException(status_code=302, headers={"Location": auth_url})

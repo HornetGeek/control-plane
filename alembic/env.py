@@ -13,7 +13,11 @@ config = context.config
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    try:
+        fileConfig(config.config_file_name)
+    except KeyError:
+        # No logging configuration in alembic.ini, skip
+        pass
 
 # add your model's MetaData object here for 'autogenerate' support
 from src.models.base import Base

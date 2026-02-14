@@ -41,7 +41,10 @@ class OIDCService:
             or self._jwks_last_update is None
             or now - self._jwks_last_update > self._jwks_cache_ttl
         ):
-            self._jwks_client = PyJWKClient(f"{self.settings.oidc_issuer}/.well-known/jwks.json")
+            # Use Keycloak-style JWKS path (works with Keycloak)
+            # For standard OIDC providers, use /.well-known/jwks.json
+            jwks_url = f"{self.settings.oidc_issuer}/protocol/openid-connect/certs"
+            self._jwks_client = PyJWKClient(jwks_url)
             self._jwks_last_update = now
 
         return self._jwks_client

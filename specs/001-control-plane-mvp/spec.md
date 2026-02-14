@@ -1,194 +1,309 @@
-# Feature Specification: Control Plane MVP
+# Master Specification: Control Plane MVP (API-only)
 
 **Feature Branch**: `001-control-plane-mvp`
 **Created**: 2026-02-09
+**Updated**: 2026-02-14
 **Status**: Draft
-**Input**: User description: "Control Plane MVP - Multi-tenant SaaS with OIDC auth, organization/tenant management, subscriptions, and launch routing"
+**IdP**: Keycloak (realm: `control-plane`)
 
-## User Scenarios & Testing *(mandatory)*
+## Goal
 
-### User Story 1 - User Authentication & Organization Association (Priority: P1)
+Build the Control Plane microservice (FastAPI) for a multi-organization, multi-tenant, multi-application SaaS platform where a user selects an app BEFORE login, then authenticates via Keycloak (OIDC), and is provisioned into Org/Tenant with a tenant-level 14-day TRIAL subscription, then launched into the selected app via short-lived Control Plane Launch JWT.
 
-A new user needs to authenticate via the organization's identity provider and be associated with their organization so they can access the platform.
+## Actors
 
-**Why this priority**: Without authentication and user-to-org linking, no other functionality is accessible. This is the foundation for all secured operations.
+- **Anonymous visitor** (pre-login)
+- **Authenticated user** (OIDC access token)
+- **Roles** (MVP):
+  - `org_admin`
+  - `tenant_admin`
+  - `tenant_member`
 
-**Independent Test**: Can be fully tested by initiating login flow, completing OIDC authentication, and verifying the user record is created with correct organization association.
+## Domain Model (MVP)
 
-**Acceptance Scenarios**:
+- Organization has multiple Tenants (branches)
+- Tenant has subscriptions to Apps
+- User belongs to exactly ONE Organization
+- User can be a member of multiple tenants within that org
+- Apps are shared SaaS apps (PACS, ERP) with fixed base URLs
 
-1. **Given** no user exists, **When** user completes OIDC authentication via Zitadel, **Then** a new user record is created with idp_sub, email, name, and organization association
-2. **Given** user exists, **When** user completes OIDC authentication, **Then** user's last_login_at is updated and session is established
-3. **Given** user authentication fails, **When** invalid/expired token is presented, **Then** access is denied with appropriate error message
+## Key Decisions (Locked)
 
----
+| Decision | Value |
+|----------|-------|
+| Pre-login flow | Creates ONLY onboarding session (A2) |
+| Pre-login collection | `org_name` and `tenant_name` |
+| Same IdP user (sub) in different org | ERROR (blocked) |
+| Launch mechanism | Control Plane short-lived Launch JWT (C2) |
+| Launch API | Accepts `tenant_id` explicitly |
+| Subscription model | Tenant-level, status=trial only (MVP) |
+| Trial duration | 14 days |
+| OIDC provider | Keycloak |
+| OIDC issuer | `http://localhost:18080/realms/control-plane` |
+| Token validation | Access token validated; `aud` check enforced |
+| Onboarding TTL | 60 minutes |
+| Onboarding consumption | Single-use (status field) |
+| Tenant uniqueness | `UNIQUE(org_id, tenant_name)` |
+| User profile persistence | `{email, name}` from IdP |
 
-### User Story 2 - Tenant Management for Organization (Priority: P1)
+## Clarifications
 
-An organization administrator needs to create and manage tenants (branches) within their organization to represent different business units or locations.
+### Session 2026-02-14
 
-**Why this priority**: Tenants are the core organizational unit for subscription scoping. Without tenant creation, the platform cannot serve multi-branch organizations.
+| # | Question | Decision |
+|---|----------|----------|
+| Q1 | Should inactive apps be visible? | Only `status=active` apps |
+| Q13 | Observability signals? | Structured logging (JSON) + `/health` endpoint |
+| Q14 | Keycloak unreachable behavior? | Return 503 with "IdP unavailable" message |
+| Q2 | Should app descriptions be included? | Minimal fields only (MVP) |
+| Q3 | Name validation? | Alphanumeric + spaces/hyphens, 3-50 chars |
+| Q4 | org_name uniqueness? | Globally unique |
+| Q5 | Expired session handling? | Delete on access attempt |
+| Q6 | Returning user response? | Access token + refresh hint |
+| Q7 | First user role? | `org_admin` |
+| Q8 | Orphaned users allowed? | Yes |
+| Q9 | Expired trial handling? | Block launch, keep record |
+| Q10 | Multiple trials same app? | No, idempotent |
+| Q11 | JWT validation method? | Shared secret (HMAC-SHA256) |
+| Q12 | Redirect URL format? | Query params format (`{base_url}/launch?token=JWT&tenant_id=ID`) |
 
-**Independent Test**: Can be fully tested by an org_admin creating a tenant, listing tenants, and verifying tenant details are correctly associated with the organization.
+## Features (Detailed Specs)
 
-**Acceptance Scenarios**:
-
-1. **Given** user is org_admin, **When** they create a new tenant with name, **Then** tenant is created and associated with their organization
-2. **Given** user is org_admin, **When** they list tenants, **Then** all tenants in their organization are returned
-3. **Given** user is org_admin, **When** they request tenant details by ID, **Then** tenant information is returned if it belongs to their organization
-4. **Given** user is not org_admin, **When** they attempt to create a tenant, **Then** access is denied
-
----
-
-### User Story 3 - Tenant Membership Management (Priority: P2)
-
-An administrator needs to add users to tenants with specific roles so users can access tenant-specific resources and applications.
-
-**Why this priority**: Membership enables users to work with specific tenants. This is critical for multi-user collaboration but can be initially seeded by admins.
-
-**Independent Test**: Can be fully tested by adding a user to a tenant with a role, listing members, and verifying the user can access tenant resources.
-
-**Acceptance Scenarios**:
-
-1. **Given** user is org_admin or tenant_admin, **When** they add a user to a tenant with a role, **Then** membership is created and user can access tenant
-2. **Given** user is org_admin or tenant_admin, **When** they list tenant members, **Then** all members and their roles are returned
-3. **Given** user is org_admin or tenant_admin, **When** they remove a user from a tenant, **Then** membership is deleted and user loses access
-4. **Given** user is not authorized, **When** they attempt to modify memberships, **Then** access is denied
-
----
-
-### User Story 4 - Application Subscription Management (Priority: P2)
-
-An administrator needs to subscribe their tenant to applications (PACS, ERP) so tenant members can launch and use those applications.
-
-**Why this priority**: Subscriptions control which applications tenants can access. This is essential for the platform's business model but can be initially configured by admins.
-
-**Independent Test**: Can be fully tested by subscribing a tenant to an application, listing subscriptions, and updating subscription status.
-
-**Acceptance Scenarios**:
-
-1. **Given** user is org_admin or tenant_admin, **When** they subscribe tenant to an application, **Then** subscription is created (idempotent - duplicate returns existing)
-2. **Given** user is org_admin or tenant_admin, **When** they list tenant subscriptions, **Then** all subscriptions for the tenant are returned
-3. **Given** user is org_admin or tenant_admin, **When** they update subscription status, **Then** status is changed (active/suspended/canceled)
-4. **Given** duplicate subscription request, **When** same tenant+app is requested again, **Then** existing subscription is returned without error
-
----
-
-### User Story 5 - Application Launch (Priority: P3)
-
-A tenant member needs to launch a subscribed application so they can access the application with their tenant context and authentication.
-
-**Why this priority**: Launch is the primary user action that delivers value. Members need to access applications they're entitled to use.
-
-**Independent Test**: Can be fully tested by a tenant member requesting launch for a subscribed application and receiving a valid redirect URL.
-
-**Acceptance Scenarios**:
-
-1. **Given** user is tenant member, **When** they request launch for subscribed app, **Then** redirect URL with tenant_id and token is returned
-2. **Given** user is tenant member, **When** they request launch for unsubscribed app, **Then** access is denied with appropriate error
-3. **Given** user is not tenant member, **When** they request launch for app, **Then** access is denied
-4. **Given** application is inactive, **When** user requests launch, **Then** access is denied
+1. Public App Catalog — `specs/features/01-public-apps.md`
+2. Pre-login Onboarding — `specs/features/02-onboarding-prelogin.md`
+3. OIDC Auth (Keycloak) — `specs/features/03-oidc-auth-keycloak.md`
+4. Orgs/Tenants/Memberships — `specs/features/04-tenants-memberships.md`
+5. Trial Subscriptions — `specs/features/05-subscriptions-trial.md`
+6. Launch Token + Redirect — `specs/features/06-launch-token.md`
+7. Admin Seed + Config — `specs/features/09-admin-seed-config.md`
 
 ---
 
-### Edge Cases
+## User Stories & Acceptance Criteria
 
-- What happens when a user's organization cannot be determined from OIDC claims during first login?
-  - **Resolution**: Authentication fails with error. The `org_id` claim is required in the OIDC token. Zitadel must be configured to include this claim for all users.
-- What happens when a user is removed from all tenants but still belongs to an organization?
-  - User retains organization membership but cannot access any tenant resources
-- What happens when a subscription is suspended while a user is actively using an application?
-  - Existing sessions may continue but new launch requests are denied
-- What happens when an organization has no tenants?
-  - Organization exists but members have no tenant-specific access
-- What happens when the last member of a tenant is removed?
-  - Tenant persists (soft delete not required for MVP) and can be re-populated
+### User Story 1 — New User Onboarding (Priority: P0)
 
-## Requirements *(mandatory)*
+A new user selects an application and provides organization/tenant names, then authenticates via Keycloak and is automatically provisioned with a 14-day trial subscription.
+
+**Why P0**: This is the core acquisition flow. Without it, no new users can access the platform.
+
+**Acceptance Scenarios**:
+
+1. **Given** no user exists, **When** user completes pre-login form (app + org_name + tenant_name) and OIDC authentication, **Then** org/tenant/user/membership are created with 14-day trial subscription
+2. **Given** onboarding session exists, **When** user completes OIDC auth within 60 minutes, **Then** provisioning succeeds and onboarding session is consumed
+3. **Given** onboarding session expired (TTL > 60min), **When** user attempts callback, **Then** error `ONBOARDING_SESSION_EXPIRED` is returned
+4. **Given** onboarding session already consumed, **When** callback is replayed, **Then** error `ONBOARDING_SESSION_CONSUMED` is returned
+
+---
+
+### User Story 2 — Returning User Login (Priority: P0)
+
+An existing user logs in without pre-selection and accesses their existing tenants and subscriptions.
+
+**Why P0**: Existing users need to access the platform. Must work seamlessly.
+
+**Acceptance Scenarios**:
+
+1. **Given** user exists, **When** user calls `GET /v1/auth/login` (no onboarding_token), **Then** redirects to Keycloak
+2. **Given** authenticated returning user, **When** callback completes, **Then** user's `last_login_at` is updated
+3. **Given** user exists in org A, **When** same `idp_sub` attempts to onboard into org B, **Then** error `USER_ORG_CONFLICT` is returned
+
+---
+
+### User Story 3 — Tenant Management (Priority: P1)
+
+Users manage tenants within their organization and membership across tenants.
+
+**Why P1**: Required for multi-branch organizations. Depends on auth (P0).
+
+**Acceptance Scenarios**:
+
+1. **Given** user is `org_admin`, **When** they create tenant with name, **Then** tenant is created with `UNIQUE(org_id, tenant_name)`
+2. **Given** duplicate tenant name in same org, **When** creation attempted, **Then** error `TENANT_NAME_EXISTS` is returned
+3. **Given** user is `org_admin` or `tenant_admin`, **When** they add user to tenant, **Then** membership is created with specified role
+4. **Given** user is `tenant_member`, **When** they attempt to add members, **Then** access is denied
+
+---
+
+### User Story 4 — Trial Subscriptions (Priority: P1)
+
+Tenants have 14-day trial subscriptions to applications, created automatically during onboarding or manually post-login.
+
+**Why P1**: Core business model. Enables app access.
+
+**Acceptance Scenarios**:
+
+1. **Given** new user onboarding, **When** provisioning completes, **Then** subscription with `status=trial` and `trial_ends_at = now + 14 days` is created
+2. **Given** authenticated user with `tenant_admin` role, **When** they request `POST /v1/subscriptions` for additional app, **Then** new trial subscription is created
+3. **Given** trial subscription expired, **When** user attempts launch, **Then** error `TRIAL_EXPIRED` is returned
+
+---
+
+### User Story 5 — Application Launch (Priority: P2)
+
+A tenant member launches a subscribed application and receives a short-lived Launch JWT.
+
+**Why P2**: Delivers value to users. Depends on all prior features.
+
+**Acceptance Scenarios**:
+
+1. **Given** user is tenant member, **When** they request `GET /v1/launch?tenant_id=X&app_id=Y`, **Then** Launch JWT is issued and 302 redirect to `{app.base_url}/launch?token=...&tenant_id=...`
+2. **Given** user is NOT tenant member, **When** they request launch, **Then** error `NOT_TENANT_MEMBER` is returned
+3. **Given** tenant has no subscription to app, **When** launch requested, **Then** error `NO_SUBSCRIPTION` is returned
+4. **Given** invalid/expired Launch JWT presented to app, **When** app validates, **Then** standard error response (per app contract)
+
+---
+
+## End-to-End Flow (MVP)
+
+### New User Flow
+
+```
+1. Anonymous selects app (pacs/erp) + org_name + tenant_name
+2. POST /v1/onboarding → creates session, returns onboarding_token + login_url
+3. GET /v1/auth/login?onboarding_token=... → 302 to Keycloak
+4. Keycloak authenticates → 302 to /v1/auth/callback?code=...&state=...
+5. POST /v1/auth/callback → validates tokens, resolves onboarding session
+6. CP provisions: org/tenant/user/membership + 14-day trial subscription
+7. CP issues short-lived Launch JWT
+8. 302 redirect to app: {base_url}/launch?token=...&tenant_id=...
+```
+
+### Returning User Flow
+
+```
+1. GET /v1/auth/login (no token) → 302 to Keycloak
+2. Keycloak authenticates → 302 to /v1/auth/callback
+3. POST /v1/auth/callback → validates tokens, looks up existing user
+4. Return authenticated session / tokens
+5. GET /v1/tenants → user selects tenant
+6. GET /v1/launch?tenant_id=X&app_id=Y → Launch JWT + redirect
+```
+
+### Add Subscription (Post-login)
+
+```
+POST /v1/subscriptions
+  { tenant_id, app_id }
+  → creates 14-day trial subscription
+```
+
+---
+
+## Requirements
 
 ### Functional Requirements
 
-**Authentication & Authorization**
-- **FR-001**: System MUST authenticate users via OpenID Connect authorization code flow with Zitadel
-- **FR-002**: System MUST validate bearer tokens using issuer URL and JWKS endpoint discovery
-- **FR-003**: System MUST extract user identity (sub claim) from validated tokens
-- **FR-004**: System MUST extract organization association from the required `org_id` claim in the OIDC token (authentication fails if claim is missing)
-- **FR-005**: System MUST deny access to protected resources without valid bearer token
-- **FR-006**: System MUST enforce organization boundaries on every request (no cross-org access)
-- **FR-007**: System MUST enforce role-based permissions (org_admin, tenant_admin, tenant_member)
+**Onboarding**
+- **FR-001**: System MUST accept pre-login form with `app_id`, `org_name`, `tenant_name`
+- **FR-002**: System MUST create onboarding session with 60-minute TTL
+- **FR-003**: System MUST enforce single-consume on onboarding sessions via status field
+- **FR-004**: System MUST bind OIDC `state` parameter to `onboarding_token` for CSRF protection
 
-**User Management**
-- **FR-008**: System MUST create user record on first successful OIDC authentication with idp_sub, email, name
-- **FR-009**: System MUST associate each user with exactly one organization
-- **FR-010**: System MUST update user's last_login_at timestamp on successful authentication
-- **FR-011**: System MUST allow querying current user information (/auth/me endpoint)
+**Authentication**
+- **FR-005**: System MUST authenticate users via OIDC authorization code flow with Keycloak
+- **FR-006**: System MUST validate bearer tokens using issuer URL and JWKS endpoint
+- **FR-007**: System MUST enforce `aud` claim validation
+- **FR-008**: System MUST extract user identity (`sub` claim) and profile (`email`, `name`) from validated tokens
+- **FR-009**: System MUST support `GET /v1/auth/login` with optional `onboarding_token` parameter
+- **FR-010**: System MUST reject same `idp_sub` attempting to onboard into different org
+
+**Provisioning**
+- **FR-011**: System MUST auto-provision organization if not exists (from onboarding `org_name`)
+- **FR-012**: System MUST auto-provision tenant if not exists (from onboarding `tenant_name`)
+- **FR-013**: System MUST create user with `idp_sub`, `email`, `name` on first authentication
+- **FR-014**: System MUST create membership linking user to tenant with default role
+- **FR-015**: System MUST create trial subscription with `status=trial`, `trial_ends_at = now + 14 days`
 
 **Tenant Management**
-- **FR-012**: System MUST allow org_admin to create tenants within their organization
-- **FR-013**: System MUST allow org_admin to list all tenants in their organization
-- **FR-014**: System MUST allow users to list tenants they are members of
-- **FR-015**: System MUST allow authorized users to retrieve tenant details by ID
-- **FR-016**: System MUST reject tenant creation by non-org_admin users
+- **FR-016**: System MUST enforce `UNIQUE(org_id, tenant_name)` constraint
+- **FR-017**: System MUST allow `org_admin` to create tenants within their organization
+- **FR-018**: System MUST allow users to list tenants they are members of
 
-**Membership Management**
-- **FR-017**: System MUST allow org_admin to add users to any tenant in their organization
-- **FR-018**: System MUST allow tenant_admin to add users to their specific tenant
-- **FR-019**: System MUST allow org_admin and tenant_admin to list tenant members
-- **FR-020**: System MUST allow org_admin and tenant_admin to remove users from a tenant
-- **FR-021**: System MUST assign a role (org_admin, tenant_admin, tenant_member) to each membership
-- **FR-022**: System MUST reject membership modifications by tenant_member
+**Membership**
+- **FR-019**: System MUST allow `org_admin` and `tenant_admin` to add users to tenants
+- **FR-020**: System MUST assign role (`org_admin`, `tenant_admin`, `tenant_member`) to memberships
+- **FR-021**: System MUST reject membership modifications by `tenant_member`
 
-**Application Management**
-- **FR-023**: System MUST provide a read-only catalog of available applications
-- **FR-024**: System MUST include application key, name, and launch base URL in catalog
-- **FR-025**: System MUST seed initial applications (PACS, ERP) on startup
-
-**Subscription Management**
-- **FR-026**: System MUST allow org_admin and tenant_admin to subscribe their tenant to applications
-- **FR-027**: System MUST make subscription creation idempotent per (tenant_id, app_key)
-- **FR-028**: System MUST allow listing all subscriptions for a tenant
-- **FR-029**: System MUST allow org_admin and tenant_admin to update subscription status
-- **FR-030**: System MUST support subscription statuses: active, suspended, canceled
-- **FR-031**: System MUST reject subscription modifications by tenant_member
+**Subscriptions**
+- **FR-022**: System MUST allow `org_admin` and `tenant_admin` to create trial subscriptions
+- **FR-023**: System MUST make subscription creation idempotent per `(tenant_id, app_id)`
+- **FR-024**: System MUST allow listing subscriptions for a tenant
 
 **Launch**
-- **FR-032**: System MUST validate user is member of tenant (or org_admin) before launch
-- **FR-033**: System MUST validate tenant has active subscription to requested application
-- **FR-034**: System MUST validate application is active and has launch base URL configured
-- **FR-035**: System MUST return redirect URL with tenant_id, access_token, and return_to parameters
-- **FR-036**: System MUST reject launch requests when membership, subscription, or application status is invalid
+- **FR-025**: System MUST validate user is member of tenant before issuing Launch JWT
+- **FR-026**: System MUST validate tenant has active/trial subscription to requested app
+- **FR-027**: System MUST issue short-lived Launch JWT with fixed claims
+- **FR-028**: System MUST return 302 redirect to `{app.base_url}/launch?token=...&tenant_id=...`
 
-**Observability**
-- **FR-037**: System MUST accept or generate correlation ID (X-Request-ID header) for each request
-- **FR-038**: System MUST return correlation ID in response headers
-- **FR-039**: System MUST log all authorization failures with correlation ID
-- **FR-040**: System MUST provide OpenAPI schema for all endpoints
+**Application Catalog**
+- **FR-029**: System MUST provide read-only catalog of available applications
+- **FR-030**: System MUST seed initial applications (PACS, ERP) on startup
 
-### Key Entities
+### Non-Functional Requirements
 
-**Organization**: Top-level customer entity containing tenants and users. Key attributes: unique identifier, name, creation timestamp. Relationships: has many tenants, has many users.
+- **NFR-001**: All protected endpoints require valid bearer token
+- **NFR-002**: Cross-organization access is blocked at data layer
+- **NFR-003**: 95% of API requests complete within 500ms
+- **NFR-004**: System supports 1000 concurrent authentication requests
+- **NFR-005**: OpenAPI schema provided for all endpoints
+- **NFR-006**: All services emit structured JSON logs to stdout
+- **NFR-007**: `/health` endpoint returns 200 when database connected, 503 otherwise
 
-**Tenant**: Branch or business unit within an organization. Subscription is scoped at tenant level. Key attributes: unique identifier, organization reference, name, creation timestamp. Relationships: belongs to organization, has many memberships, has many subscriptions.
+---
 
-**User**: Person authenticated via OIDC. Belongs to exactly one organization. Key attributes: unique identifier, organization reference, identity provider subject (idp_sub), email, name, creation timestamp, last login timestamp, status. Relationships: belongs to organization, has many memberships.
+## Key Entities
 
-**Membership**: Association between a user and a tenant with a specific role. Key attributes: unique identifier, tenant reference, user reference, role (org_admin/tenant_admin/tenant_member), status, creation timestamp. Relationships: belongs to tenant, belongs to user.
+**Organization**: Top-level customer entity. Key attributes: `id`, `name`, `created_at`. Constraint: unique name.
 
-**Application**: Product that tenants can subscribe to (PACS, ERP). Key attributes: unique key (app_key), name, launch base URL, status. Relationships: has many subscriptions.
+**Tenant**: Branch within organization. Key attributes: `id`, `org_id`, `name`, `created_at`. Constraint: `UNIQUE(org_id, name)`.
 
-**Subscription**: Entitlement that allows a tenant to access an application. Key attributes: unique identifier, tenant reference, application key, status (active/suspended/canceled), start timestamp, update timestamp. Relationships: belongs to tenant, references application.
+**User**: Authenticated person. Key attributes: `id`, `org_id`, `idp_sub`, `email`, `name`, `last_login_at`, `created_at`. Constraint: unique `idp_sub`.
 
-## Success Criteria *(mandatory)*
+**Membership**: User ↔ Tenant association. Key attributes: `id`, `tenant_id`, `user_id`, `role`, `created_at`.
 
-### Measurable Outcomes
+**Application**: SaaS product. Key attributes: `id`, `app_key`, `name`, `base_url`, `status`.
 
-- **SC-001**: New users can complete authentication and access the platform within 30 seconds
-- **SC-002**: Organization administrators can create a new tenant in under 10 seconds
-- **SC-003**: Administrators can add users to tenants with roles in under 5 seconds per user
-- **SC-004**: Tenant members can launch subscribed applications and receive redirect URL within 2 seconds
-- **SC-005**: 100% of protected endpoints reject requests without valid bearer token
-- **SC-006**: 100% of cross-organization access attempts are blocked
-- **SC-007**: 100% of unauthorized role-based access attempts are blocked
-- **SC-008**: System supports 1000 concurrent authentication requests without degradation
-- **SC-009**: 95% of API requests complete within 500 milliseconds
-- **SC-010**: All authorization failures include correlation ID for troubleshooting
+**Subscription**: Tenant → App entitlement. Key attributes: `id`, `tenant_id`, `app_id`, `status` (trial), `trial_ends_at`, `created_at`.
+
+**OnboardingSession**: Pre-login session. Key attributes: `id`, `token`, `org_name`, `tenant_name`, `app_id`, `status` (pending/consumed/expired), `expires_at`, `created_at`.
+
+---
+
+## Error Codes
+
+| Code | HTTP | Description |
+|------|------|-------------|
+| `ONBOARDING_SESSION_EXPIRED` | 400 | Session TTL exceeded |
+| `ONBOARDING_SESSION_CONSUMED` | 400 | Session already used |
+| `USER_ORG_CONFLICT` | 409 | User exists in different org |
+| `TENANT_NAME_EXISTS` | 409 | Tenant name already in org |
+| `NOT_TENANT_MEMBER` | 403 | User not member of tenant |
+| `NO_SUBSCRIPTION` | 403 | No subscription to app |
+| `TRIAL_EXPIRED` | 403 | Trial period ended |
+| `INVALID_TOKEN` | 401 | Invalid/expired token |
+| `IDP_UNAVAILABLE` | 503 | Identity provider unreachable |
+
+---
+
+## Non-Goals (MVP)
+
+- Billing/Stripe integration
+- Core services split (RBAC engine, audit service, notification service)
+- Multi-org per user
+- SAML (OIDC only)
+- Web UI (API-only)
+
+---
+
+## Success Criteria
+
+| ID | Criteria |
+|----|----------|
+| SC-001 | New user completes onboarding + auth + redirect in under 60 seconds |
+| SC-002 | Returning user logs in and sees tenant list within 10 seconds |
+| SC-003 | Trial subscription auto-created with correct 14-day expiry |
+| SC-004 | `/v1/launch` enforces membership + subscription |
+| SC-005 | Same user (sub) blocked from onboarding to different org |
+| SC-006 | 100% of protected endpoints reject invalid tokens |
+| SC-007 | 95% of API requests complete within 500ms |
