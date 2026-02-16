@@ -1,161 +1,225 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: 1.0.0 -> 1.1.0
+Version change: 1.1.0 -> 2.0.0
+
 Modified principles:
-  - IV. OIDC-First Authentication (Zitadel → Keycloak, claim changes)
-  - II. Strict Tenancy Boundaries (added One User = One Org)
+  - I. API-First Architecture → I. Mission & Scope (now includes admin UI)
+  - II. Strict Tenancy Boundaries → Absorbed into 3-plane architecture
+  - III. Subscription-Based Access Control → Implicit in Mission & Scope
+  - IV. OIDC-First Authentication → III. Trust & Security Model (local validation + delegation)
+  - VII. Coarse-Grained Authorization → IV. Roles & Access Semantics (delegated to Core)
+  - VIII. Idempotent Operations → VII. CP↔Core Synchronization (membership creation)
+  - X. Audit Stubs Only → Removed (deferred to Core service)
+
+Removed sections:
+  - V. Pre-Login Onboarding (no longer in scope for CP)
+  - IX. Launch via Short-Lived JWT (replaced with redirect flow)
+
 Added sections:
-  - Pre-login Onboarding principle
-  - Trial Subscriptions principle
-Removed sections: None
+  - II. Architectural Position (3-plane model: CP/Core/Data Plane)
+  - V. Caching Strategy (Redis for authorization decisions)
+  - VI. Data Lifecycle Rules (soft delete + status)
+  - VIII. App Launch & SSO Behavior (redirect, no token issuance)
+  - IX. API Governance (public vs protected, error contract)
+  - X. Subscription Trial Period (14-day trials for MVP)
+
 Templates requiring updates:
-  - ✅ spec-template.md - No updates needed
-  - ✅ plan-template.md - No updates needed
-  - ✅ tasks-template.md - No updates needed
-Follow-up TODOs: Regenerate tasks.md to align with updated constitution
+  - ✅ spec-template.md - No structural changes needed
+  - ✅ plan-template.md - Constitution Check section remains valid
+  - ✅ tasks-template.md - No structural changes needed
+
+Follow-up TODOs:
+  - Regenerate tasks.md for existing features to align with new architecture
+  - Update feature specs if they reference removed principles (Pre-Login Onboarding, Launch JWT)
+  - Review existing code for Launch JWT implementation that needs removal
+  - Implement mock Core client for authorization decisions (MVP)
+
+MVP Clarification (2026-02-15):
+  - Core service is out of scope for this project
+  - Authorization delegation uses a mock Core client for MVP
+  - Mock will be replaced with actual Core service calls in future phase
+  - 14-day trial subscriptions are IN SCOPE for MVP (added as Principle X)
 -->
 
 # Control Plane Constitution
 
 ## Core Principles
 
-### I. API-First Architecture
-**All functionality is exposed via REST API; no web UI in this service.**
+### I. Mission & Scope
+**Control Plane (CP) is the public-facing Generic SaaS management service.**
 
-Rationale: As a microservice in a larger SaaS platform, the Control Plane serves as the backend for other services and potential frontends. Keeping it API-only ensures clean separation of concerns and enables multiple client types (web, mobile, other services) to interact without UI coupling.
+CP provides:
+- Application catalog management (PACS/ERP and future apps)
+- Organization and tenant (branch) registry
+- Tenant subscription registry (tenant ↔ app)
+- Administrative views for SaaS operations (dashboard, tenants, organizations, settings)
 
-### II. Strict Tenancy Boundaries
-**Organization and tenant boundaries MUST be enforced at all layers; cross-organization access is FORBIDDEN. One user belongs to exactly ONE organization.**
+CP explicitly does **not** provide:
+- Business-domain workflows (these belong to Data Plane apps)
+- Role/permission data ownership (belongs to Core)
+- Session issuance or launch JWT issuance
+
+Rationale: Clear boundary definition prevents scope creep and ensures each service in the platform has focused responsibilities. CP manages the SaaS registry; Core manages identity and access; Data Plane apps manage domain workflows.
+
+### II. Architectural Position (3-Plane Model)
+**The platform consists of three distinct planes with clear ownership boundaries.**
+
+- **Control Plane (this service):** SaaS registry + management APIs (Postgres)
+- **Core Service:** identity/membership/RBAC + authorization decisions
+- **Data Plane:** application microservices (PACS/ERP) with tenant-aware domain data
+
+CP is the source of truth for:
+- applications, organizations, tenants, subscriptions
+
+Core is the source of truth for:
+- users (IdP-linked), memberships, roles/permissions, authorization decisions
+
+Rationale: This separation enables independent scaling, clear data ownership, and simplifies compliance. Each plane can evolve independently while maintaining well-defined integration contracts.
+
+### III. Trust & Security Model (Public Service)
+**CP is public internet accessible with strict authentication and delegated authorization.**
+
+#### 3.1 Local OIDC Token Validation (CP responsibility)
+CP must validate each incoming bearer access token locally:
+- signature verification using Keycloak JWKS
+- issuer match
+- audience match (`aud == client_id`)
+- expiration check
+- clock skew tolerance (small, configurable)
+
+CP does not rely on Core for token validity.
+
+#### 3.2 Authorization Delegation (Core responsibility)
+CP must not encode authorization rules internally. Instead, CP delegates all authorization checks to Core:
+- CP provides subject context (sub, org/tenant scope, requested action)
+- Core returns allow/deny + scoped entitlements
+
+**MVP Note**: Core service is out of scope for this project. CP uses a **mock Core client** for authorization decisions during MVP. The mock:
+- Returns predictable allow/deny responses based on configured test scenarios
+- Simulates role-based access (super_admin, org_admin, tenant_admin)
+- Will be replaced with actual Core service integration in a future phase
+
+If Core (or mock) is unreachable:
+- CP fails closed for protected endpoints (deny with service error)
+- Only health endpoints may remain available
+
+Rationale: Centralizing authorization in Core ensures consistent policy enforcement across all platform services. Local token validation prevents unnecessary network calls for every request while maintaining security.
+
+### IV. Roles & Access Semantics (enforced by Core)
+**CP supports predefined roles conceptually, enforced via Core decisions.**
+
+- **super_admin** (global)
+  - Can manage applications, organizations, view global dashboards, list all users (via Core)
+  - Created manually one time (bootstrap)
+- **org_admin** (org scoped)
+  - Can view/manage all tenants and subscriptions under their organization
+- **tenant_admin** (tenant scoped)
+  - Can view/manage only their tenant and its subscriptions
+- **tenant_member**
+  - No access to CP
+
+CP assumes Core will return authorization decisions consistent with these semantics.
+
+Rationale: MVP requires simple, predictable authorization. Complex role systems add overhead that can be added later if needed. Core enforces these roles so CP remains policy-agnostic.
+
+### V. Caching Strategy (Redis) — Authorization Decisions Only
+**CP uses Redis to cache authorization decisions, not token validation.**
+
+#### 5.1 Cache Inputs
+- `token_fingerprint` = SHA-256(full bearer token)
+- `request_scope` = tuple(action, resource_type, org_id?, tenant_id?)
+
+#### 5.2 Cache Value
+Cache stores Core's result:
+- allow/deny
+- resolved subject identifiers (sub, org_id, tenant_ids scope)
+- effective role scope (super/org/tenant)
+- expiry timestamp
+
+#### 5.3 TTL Rules
+- TTL must be short and safe (recommend: 60–300 seconds)
+- TTL must never exceed token expiry
+- Deny decisions may be cached briefly (e.g., 30–60 seconds) to reduce repeated load
+
+#### 5.4 Revocation & Consistency
+Membership/role changes may take up to cache TTL to reflect. This is acceptable for MVP; later phases may add explicit cache invalidation.
+
+Rationale: Caching authorization decisions reduces load on Core and improves response times. Short TTLs balance performance with consistency. Token validation must not be cached for security reasons. The caching infrastructure is implemented in MVP (even with mock Core) to ensure architecture is ready for real Core integration.
+
+### VI. Data Lifecycle Rules (Soft Delete + Status)
+**All CP-owned entities must support soft deletion and status tracking.**
+
+Required fields:
+- `status` field (e.g., active/disabled)
+- `deleted_at` timestamp (soft delete)
 
 Rules:
-- An Organization contains many Tenants (branches)
-- A User belongs to exactly **one** Organization
-- A User may have membership in multiple Tenants under the same Organization
-- Cross-organization access MUST be rejected at the authorization layer
-- Client-supplied `org_id` MUST never be trusted; derive from authenticated user mapping
-- **Same IdP user (`idp_sub`) attempting to onboard into a different org is BLOCKED with error**
+- Soft-deleted records are not returned by default list endpoints
+- Deleting an org/tenant must be restricted by Core authorization
+- Deleting an org/tenant must not silently orphan critical dependencies
 
-Rationale: Data isolation between organizations is critical for multi-tenant SaaS security. Any breach of tenancy boundaries is a critical security vulnerability. One-user-one-org simplifies security model for MVP.
+Rationale: Soft deletion enables recovery from accidental deletions and supports audit requirements. Status tracking enables temporary suspension without data loss.
 
-### III. Subscription-Based Access Control
-**Access to applications requires BOTH active tenant subscription AND user membership in that tenant.**
+### VII. CP↔Core Synchronization Responsibilities
+**When CP creates or updates registry entities that affect access, CP must synchronize corresponding access artifacts in Core.**
 
-Rules:
-- Subscriptions are managed at Tenant level (not organization or user level)
-- Application access checks verify:
-  1. Tenant has an active subscription to the application
-  2. User has membership in the tenant
-- Missing either condition results in 403 Forbidden
+**MVP Note**: Since Core is out of scope for MVP, synchronization calls are stubbed. The stub logs the intended sync operation without making actual calls. This will be replaced with real Core integration in a future phase.
 
-Rationale: This dual-requirement ensures proper billing boundaries and team/branch access control.
+#### 7.1 Membership Creation (MVP rule)
+After CP commits DB changes:
+- CP calls Core to create membership/role bindings
+- This call must be idempotent (safe to retry)
+- If Core fails after CP commit:
+  - CP returns a controlled error and records a "sync_pending" state for later retry
+  - MVP can retry inline + log
 
-### IV. OIDC-First Authentication
-**All authentication uses OpenID Connect with Keycloak (realm: control-plane); no password storage.**
+This ensures CP (registry) and Core (access) remain aligned.
 
-Rules:
-- Service acts as OIDC client using authorization code flow
-- Keycloak realm: `control-plane`
-- Issuer URL: `http://localhost:18080/realms/control-plane`
-- Tokens validated via issuer + JWKS endpoint
-- Required claims from IdP: `sub` (user ID), `email`, `name`
-- **Organization association derived from pre-login onboarding session, NOT from IdP claim**
-- `aud` (audience) claim validation is enforced
-- Reject unsigned tokens or unknown algorithms
-- Token validation MUST happen before any authorization checks
+Rationale: CP owns the registry data, but Core owns the access enforcement. Synchronization ensures consistency. Idempotency enables safe retries in distributed systems.
 
-Rationale: Centralized auth with Keycloak provides consistent identity across the platform, eliminates password management risk, and enables SSO. Organization is determined by onboarding flow, not IdP, enabling self-service signup.
+### VIII. App Launch & SSO Behavior
+**CP must not issue any launch tokens.**
 
-### V. Pre-Login Onboarding
-**User selects application and provides org/tenant names BEFORE authentication.**
+When a user selects "Open PACS/ERP":
+- CP redirects to the Data Plane application base URL
+- The application performs its own OIDC login against Keycloak
+- Keycloak redirects back to the application domain
+- Application enforces tenant isolation and authorization using Core
 
-Rules:
-- Onboarding collects: `app_id`, `org_name`, `tenant_name`
-- Onboarding session has 60-minute TTL
-- Onboarding session is single-consume (status: pending → consumed)
-- OIDC `state` parameter MUST be bound to `onboarding_token` for CSRF protection
-- On callback: auto-provision org (if not exists), tenant (if not exists), user, membership, trial subscription
-- Onboarding session is consumed after successful provisioning
+Rationale: Eliminating launch tokens simplifies the architecture and removes CP as a token issuer. Each application manages its own authentication, reducing CP's security surface.
 
-Rationale: Pre-login flow enables self-service signup without admin intervention. Session-based onboarding with TTL prevents abuse while allowing reasonable time for authentication.
+### IX. API Governance
+**All APIs must follow consistent governance rules.**
 
-### VI. Trial Subscriptions (MVP)
-**All subscriptions are 14-day trials; no paid plans or billing in MVP.**
+#### 9.1 Public vs Protected APIs
+- Public endpoints are explicitly versioned and namespaced (e.g., `/v1/public/...`)
+- All other endpoints are protected and require valid bearer token + Core authorization
+
+#### 9.2 Error Contract
+All endpoints must return a consistent error envelope:
+
+```json
+{
+  "error_code": "STRING",
+  "message": "STRING",
+  "details": {}
+}
+```
+
+Rationale: Consistent API governance improves developer experience and enables automated tooling. Clear error contracts simplify debugging and client implementation.
+
+### X. Subscription Trial Period (MVP)
+**Subscriptions default to 14-day trial status; no billing in MVP.**
 
 Rules:
 - New subscriptions default to `status=trial`
 - `trial_ends_at` is set to `now + 14 days` on creation
-- Launch requests check if trial has expired
-- No Stripe or payment processing
-- Post-login endpoint allows adding additional trial subscriptions
+- Expired trials cannot launch apps
+- No payment processing (deferred to future phase)
+- Idempotent: one trial per `(tenant_id, app_id)`
 
 Rationale: MVP focuses on user acquisition and platform validation. Billing complexity is deferred. Trial duration is sufficient for evaluation without indefinite free access.
-
-### VII. Coarse-Grained Authorization
-**Authorization uses three predefined roles; custom roles are NOT supported in MVP.**
-
-Roles:
-- `org_admin`: Can manage all tenants within their organization
-- `tenant_admin`: Can manage a specific tenant only
-- `tenant_member`: Read/launch access for that tenant
-
-Rationale: MVP requires simple, predictable authorization. Complex role systems add overhead that can be added later if needed.
-
-### VIII. Idempotent Operations
-**All state-changing operations that may be retried MUST be idempotent.**
-
-Required for:
-- Creating tenant memberships (no duplicate entries)
-- Subscribing tenants to applications (idempotent by tenant_id + app_id)
-- Onboarding session consumption
-
-Rationale: Distributed systems experience network failures and retries. Idempotency prevents duplicate state and simplifies client error handling.
-
-### IX. Launch via Short-Lived JWT
-**Application launch uses Control Plane-issued short-lived Launch JWT, not direct access token passthrough.**
-
-Rules:
-- Launch JWT is short-lived (5 minutes)
-- Launch JWT contains: `sub`, `tenant_id`, `app_id`, `exp`, `jti`
-- Apps validate Launch JWT using Control Plane's public key or shared secret
-- Launch endpoint returns 302 redirect with token in query string
-- Standard error format for invalid/expired tokens
-
-Rationale: Short-lived tokens limit exposure window. Apps don't need to understand OIDC tokens. Control Plane maintains control over what claims apps receive.
-
-### X. Audit Stubs Only
-**Audit logging uses internal interfaces with minimal persistence; no external dispatch in MVP.**
-
-Rules:
-- Define internal stub interfaces for audit events
-- Optional database table for critical actions
-- No external notification service integration
-- No real-time audit stream to external systems
-
-Rationale: Full audit infrastructure is a cross-cutting concern best extracted to a Core service. For MVP, stubs enable future expansion without premature optimization.
-
-## Architecture Standards
-
-### Multi-Service Platform Context
-The Control Plane is one microservice in a larger platform:
-- **Upstream**: OIDC Provider (Keycloak)
-- **Downstream**: Application services (PACS, ERP, etc.) receive launch requests via Launch JWT
-- **Lateral**: Core services (future: RBAC, audit, notifications)
-
-### Data Flow (New User)
-1. User completes pre-login form (app + org_name + tenant_name)
-2. Control Plane creates onboarding session → returns onboarding_token
-3. User redirected to Keycloak → authenticates
-4. Keycloak redirects to callback with auth code
-5. Control Plane validates tokens, resolves onboarding session
-6. Control Plane auto-provisions: org, tenant, user, membership, trial subscription
-7. Control Plane issues Launch JWT → redirects to app
-
-### Data Flow (Returning User)
-1. User calls `/v1/auth/login` (no onboarding_token)
-2. Redirected to Keycloak → authenticates
-3. Callback validates tokens → looks up existing user
-4. User can list tenants, request launch for subscribed apps
 
 ## Technology Standards
 
@@ -171,10 +235,16 @@ The Control Plane is one microservice in a larger platform:
 - All database operations MUST be async
 - **asyncpg** driver for PostgreSQL
 
+### Caching
+- **Redis** for authorization decision caching
+- Cache keys MUST include token fingerprint + request scope
+- Cache invalidation via TTL only (MVP)
+
 ### Testing
 - **pytest** with async support
 - Test organization: `tests/unit/`, `tests/integration/`, `tests/contract/`
 - Mock Keycloak for integration tests
+- **Mock Core client** used for authorization in all tests (real Core out of scope)
 
 ### API Documentation
 - OpenAPI 3.0 generated from FastAPI routes
@@ -185,62 +255,20 @@ The Control Plane is one microservice in a larger platform:
 - No config files in production
 - Secrets via environment (no hardcoded credentials)
 
-## API Standards
-
-### Versioning
-- All endpoints under `/v1/` prefix
-- Breaking changes require `/v2/` with migration path
-
-### Error Format
-Standard error response structure with error codes:
-
-```json
-{
-  "code": "ERROR_CODE",
-  "message": "Human-readable description",
-  "details": { /* optional context */ }
-}
-```
-
-### Standard Error Codes (MVP)
-
-| Code | HTTP | Description |
-|------|------|-------------|
-| `ONBOARDING_SESSION_EXPIRED` | 400 | Session TTL exceeded |
-| `ONBOARDING_SESSION_CONSUMED` | 400 | Session already used |
-| `USER_ORG_CONFLICT` | 409 | User exists in different org |
-| `TENANT_NAME_EXISTS` | 409 | Tenant name already in org |
-| `NOT_TENANT_MEMBER` | 403 | User not member of tenant |
-| `NO_SUBSCRIPTION` | 403 | No subscription to app |
-| `TRIAL_EXPIRED` | 403 | Trial period ended |
-| `INVALID_TOKEN` | 401 | Invalid/expired token |
-
-### Pagination
-List endpoints that may grow MUST support pagination:
-- Query params: `limit` (default: 50, max: 1000), `offset` (default: 0)
-- Response includes: `total`, `limit`, `offset`, `items`
-
 ## Security Standards
 
-### Authentication
-- All non-public endpoints require valid bearer token
-- Token validation: issuer URL + JWKS endpoint verification
-- Reject tokens with: invalid signature, expired, unknown algorithm, wrong audience
+### Authentication Flow
+1. Extract and validate bearer token locally (JWKS)
+2. Derive user identity (`sub`) from token
+3. Proceed to authorization delegation
 
 ### Authorization Flow
-1. Extract and validate bearer token
-2. Derive user identity (`sub`) from token
-3. Look up user's organization association
-4. Enforce organization boundary (reject if user not in requested org)
-5. Enforce tenant membership (user must be member of tenant)
-6. Enforce subscription status (if accessing application)
-7. Apply role-based permissions
-
-### Onboarding Security
-- OIDC `state` parameter binds to `onboarding_token`
-- Onboarding session has 60-minute maximum TTL
-- Single-consume prevents replay attacks
-- Same `idp_sub` cannot onboard into multiple orgs
+1. Build request context (action, resource, org_id, tenant_id)
+2. Generate token fingerprint
+3. Check Redis cache for authorization decision
+4. If cache miss: call Core with subject context
+5. Cache Core's decision per TTL rules
+6. Enforce allow/deny
 
 ### Correlation IDs
 - Accept `X-Request-ID` header from client
@@ -249,46 +277,14 @@ List endpoints that may grow MUST support pagination:
 - Include in all log entries
 
 ### Security Checklist
-- [ ] Never trust client-supplied `org_id` or `tenant_id` for authorization
-- [ ] Validate all tokens before processing requests
+- [ ] Validate all tokens locally before processing requests
+- [ ] Delegate all authorization checks to Core (mock for MVP, real Core in future)
+- [ ] Fail closed when Core/mock is unreachable
 - [ ] Log all authorization failures
 - [ ] Include correlation ID in all logs
 - [ ] Use parameterized queries (SQL injection prevention)
 - [ ] Sanitize error messages (no internal details in client errors)
-- [ ] Bind OIDC state to onboarding token (CSRF protection)
-- [ ] Enforce single-consume on onboarding sessions
-
-## MVP Deliverables
-
-The following endpoints/features are in scope for MVP v1.0:
-
-### Pre-Login Onboarding
-- `POST /v1/onboarding` - Create onboarding session (app + org_name + tenant_name)
-
-### Authentication
-- `GET /v1/auth/login` - Redirect to Keycloak OIDC (optional `onboarding_token`)
-- `GET /v1/auth/callback` - OIDC callback handler (provisioning + Launch JWT)
-- `GET /v1/auth/me` - Current user info
-
-### Tenant Management
-- `POST /v1/tenants` - Create tenant (requires org_admin)
-- `GET /v1/tenants/{id}` - Get tenant details
-- `GET /v1/tenants` - List tenants (filtered by membership)
-
-### Membership Management
-- `POST /v1/tenants/{tenant_id}/members` - Add user to tenant
-- `DELETE /v1/tenants/{tenant_id}/members/{user_id}` - Remove user from tenant
-- `GET /v1/tenants/{tenant_id}/members` - List tenant members
-
-### Application Catalog
-- `GET /v1/applications` - List available applications (read-only catalog)
-
-### Subscriptions
-- `POST /v1/subscriptions` - Subscribe tenant to application (creates 14-day trial)
-- `GET /v1/tenants/{tenant_id}/subscriptions` - List tenant subscriptions
-
-### Launch Endpoint
-- `GET /v1/launch` - Issue Launch JWT and redirect to target application
+- [ ] Never issue launch tokens or session tokens
 
 ## Governance
 
@@ -309,4 +305,4 @@ The following endpoints/features are in scope for MVP v1.0:
 - Implementation plans MUST document any violations with justification
 - Code reviews MUST verify constitutional compliance
 
-**Version**: 1.1.0 | **Ratified**: 2026-02-09 | **Last Amended**: 2026-02-14
+**Version**: 2.0.0 | **Ratified**: 2026-02-09 | **Last Amended**: 2026-02-15
