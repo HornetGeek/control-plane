@@ -1,0 +1,314 @@
+openapi: 3.0.3
+info:
+  title: Organization Registration API
+  description: |
+    Public API for self-service organization registration.
+    This endpoint is unauthenticated and creates organizations in pending_invite status.
+  version: 1.0.0
+  contact:
+    name: Control Plane API Support
+
+servers:
+  - url: /v1/public
+    description: Public endpoints (no authentication required)
+
+paths:
+  /registration:
+    post:
+      summary: Register a new organization
+      description: |
+        Creates a new organization with pending_invite status and initiates IdP invite flow.
+
+        **Idempotency**: Include `Idempotency-Key` header to prevent duplicate registrations on retries.
+        The same key will return the original response for 24 hours.
+
+        **Rate Limiting**: 10 requests per IP per hour. Returns 429 when exceeded.
+      operationId: registerOrganization
+      tags:
+        - Registration
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: Unique key for idempotent requests (prevents duplicates on retry)
+          required: false
+          schema:
+            type: string
+            maxLength: 64
+        - name: X-Request-ID
+          in: header
+          description: Client-provided correlation ID
+          required: false
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistrationRequest'
+            examples:
+              basic:
+                summary: Basic registration
+                value:
+                  organization_name: Acme Corp
+                  admin_email: admin@acmecorp.com
+                  admin_first_name: John
+                  admin_last_name: Smith
+                  country_code: US
+                  accept_terms: true
+              with_phone:
+                summary: Registration with phone
+                value:
+                  organization_name: Acme Corp
+                  admin_email: admin@acmecorp.com
+                  admin_first_name: John
+                  admin_last_name: Smith
+                  country_code: US
+                  admin_phone: "+12125551234"
+                  accept_terms: true
+                  accepted_locale: en-US
+      responses:
+        '201':
+          description: Registration successful
+          headers:
+            X-Request-ID:
+              description: Correlation ID for this request
+              schema:
+                type: string
+                format: uuid
+            X-RateLimit-Limit:
+              description: Rate limit ceiling
+              schema:
+                type: integer
+            X-RateLimit-Remaining:
+              description: Remaining requests in window
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationResponse'
+        '409':
+          description: Conflict - duplicate email
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                duplicate_email:
+                  summary: Email already registered
+                  value:
+                    error_code: EMAIL_ALREADY_REGISTERED
+                    message: This email is already associated with an account
+                    details:
+                      sign_in_url: /login
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                terms_not_accepted:
+                  summary: Terms not accepted
+                  value:
+                    error_code: TERMS_NOT_ACCEPTED
+                    message: Please accept the Terms of Service and Privacy Policy
+                    details: {}
+                invalid_email:
+                  summary: Invalid email format
+                  value:
+                    error_code: VALIDATION_ERROR
+                    message: Invalid email format
+                    details:
+                      field: admin_email
+        '429':
+          description: Rate limit exceeded
+          headers:
+            Retry-After:
+              description: Seconds until rate limit resets
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: RATE_LIMITED
+                message: Too many registration attempts. Please try again later.
+                details:
+                  retry_after: 3600
+
+  /registration/{registration_id}/resend-invite:
+    post:
+      summary: Resend IdP invite
+      description: |
+        Re-sends the IdP invite for a failed registration.
+        Only available when invite_status is 'failed'.
+      operationId: resendInvite
+      tags:
+        - Registration
+      parameters:
+        - name: registration_id
+          in: path
+          required: true
+          description: Registration ID from original response
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Invite resent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationResponse'
+        '404':
+          description: Registration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: REGISTRATION_NOT_FOUND
+                message: Registration not found
+                details: {}
+        '409':
+          description: Conflict - cannot resend invite (invalid invite state)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: INVALID_INVITE_STATUS
+                message: Can only resend invite when previous attempt failed
+                details:
+                  current_status: sent
+
+components:
+  schemas:
+    RegistrationRequest:
+      type: object
+      required:
+        - organization_name
+        - admin_email
+        - admin_first_name
+        - admin_last_name
+        - country_code
+        - accept_terms
+      properties:
+        organization_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Display name for the organization
+          example: Acme Corp
+        admin_email:
+          type: string
+          format: email
+          maxLength: 255
+          description: Admin's email address
+          example: admin@acmecorp.com
+        admin_first_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Admin's first name
+          example: John
+        admin_last_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Admin's last name
+          example: Smith
+        admin_phone:
+          type: string
+          pattern: '^\+[1-9]\d{1,14}$'
+          description: Admin's phone number in E.164 format (optional)
+          example: "+12125551234"
+        country_code:
+          type: string
+          pattern: '^[A-Z]{2}$'
+          description: ISO 3166-1 alpha-2 country code
+          example: US
+        accept_terms:
+          type: boolean
+          description: Must be true to proceed with registration
+          example: true
+        accepted_locale:
+          type: string
+          pattern: '^[a-z]{2}(-[A-Z]{2})?$'
+          description: BCP 47 locale of the user at acceptance
+          example: en-US
+
+    RegistrationResponse:
+      type: object
+      required:
+        - registration_id
+        - organization_id
+        - organization_slug
+        - status
+        - invite_status
+      properties:
+        registration_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this registration
+          example: 550e8400-e29b-41d4-a716-446655440000
+        organization_id:
+          type: string
+          format: uuid
+          description: Created organization ID
+          example: 660e8400-e29b-41d4-a716-446655440001
+        organization_slug:
+          type: string
+          description: Unique URL-safe identifier for the organization
+          example: acme-corp
+        status:
+          type: string
+          enum: [pending, completed, failed]
+          description: Registration status
+          example: completed
+        invite_status:
+          type: string
+          enum: [pending, sent, failed]
+          description: IdP invite status
+          example: sent
+        message:
+          type: string
+          description: Human-readable status message
+          example: Check your email to complete setup
+
+    ErrorResponse:
+      type: object
+      required:
+        - error_code
+        - message
+      properties:
+        error_code:
+          type: string
+          description: Machine-readable error code
+          enum:
+            - VALIDATION_ERROR
+            - TERMS_NOT_ACCEPTED
+            - EMAIL_ALREADY_REGISTERED
+            - ORGANIZATION_NAME_INVALID
+            - RATE_LIMITED
+            - REGISTRATION_NOT_FOUND
+            - INVALID_INVITE_STATUS
+            - INTERNAL_ERROR
+          example: EMAIL_ALREADY_REGISTERED
+        message:
+          type: string
+          description: Human-readable error message
+          example: This email is already associated with an account
+        details:
+          type: object
+          additionalProperties: true
+          description: Additional error context
+          example:
+            sign_in_url: /login
+
+  securitySchemes: {}
+security: []
